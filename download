@@ -1,0 +1,5 @@
+# Local ComputerCraft configuration/checkpoints and installer backups
+/Configs/
+*.pre_update
+*.download
+__pycache__/
