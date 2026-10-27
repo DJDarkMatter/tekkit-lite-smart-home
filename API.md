@@ -2,7 +2,9 @@
 
 ## Single-file apps
 
-Place a Lua file returning an app table in `Apps/` on the OS computer and restart the OS. Files are discovered automatically; the saved `appRegistry` records enabled apps. An entry set to `false` disables loading it. The example `Apps/switchboard.lua` uses no modem, redstone or filesystem APIs.
+The installer contains no apps. A user app is a Lua file returning an app table, stored in `Apps/` on the OS computer. It executes only if `enabledApps[APP_NAME] = true` in `Configs/os.txt`; restart the OS after changing this setting. The default is an empty table. The saved legacy `appRegistry` does not enable execution. All examples below describe the future app interface; app development is deferred until IO connectivity is reliable.
+
+Explicit installation uses the same installer: `inst app APP_NAME PASTE_ID` or `inst app APP_NAME --file /path/to/app.lua`. It checks syntax, installs the file and enables that one app for the next OS start. It preserves existing settings, startup and saved app state, backing up replaced code/settings. It does not execute the app at install time. Network download uses the built-in Pastebin program; no GitHub connection is needed.
 
 ```lua
 local app = {minWidth = 18, minHeight = 4, maxWidth = 40, maxHeight = 12}
@@ -84,7 +86,7 @@ Multiple logical monitor endpoints can share a computer/reply channel. The recip
 2. OS registers the logical endpoint and returns `welcome`, echoing `nonce` and including its persisted per-boot `serverSession`.
 3. Client accepts a welcome only for its current nonce. IO reports all inputs, including zero values.
 4. OS sends the IO client `ioCommand`, with `command = "syncOutputs"`, `serverSession`, integer `revision`, and `outputs` indexed by physical side.
-5. Client validates the complete snapshot before applying it, ignores earlier revisions/sessions, then sends `ioAck` with the applied revision and session.
+5. Client validates the complete snapshot, ignores earlier revisions/sessions and queues the latest accepted state. Changed outputs are written at least `outputInterval` seconds apart per side (default 0.6), sharing the cooldown between bundled and digital redstone for IDT-Fix servers. Network and input events continue during the wait. Only when every value in the latest snapshot has reached the hardware does the client send `ioAck` with that revision and session. Repeated applied snapshots are acknowledged without redundant writes.
 6. OS retries unacknowledged state every two seconds. Announcements/full resynchronization also repeat every five seconds, recovering lost welcomes/acks/frames and OS/client restarts.
 
 An IO snapshot looks like:

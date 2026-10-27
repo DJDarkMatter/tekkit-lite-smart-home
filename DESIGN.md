@@ -95,6 +95,8 @@ Every monitor desktop has a taskbar:
 
 Apps are single files stored on the OS computer.
 
+The OS installer includes no apps and enables none by default. Apps are user-specific, installed separately and explicitly enabled in `Configs/os.txt`. An app file's presence or an older saved registry entry must not cause it to run automatically. App implementation is deferred until the OS/IO connection works reliably.
+
 ### App Structure
 Each app has two parts:
 
@@ -111,7 +113,7 @@ Some apps run continuously even when no window is open (e.g. coffee automation r
 
 ### Adding Apps
 1. Create/edit one app file in Apps folder on OS
-2. Add to registry so it appears on compatible desktops
+2. Explicitly enable its name in `enabledApps` in `Configs/os.txt` so it appears on compatible desktops
 3. No changes to core OS or other apps
 
 ## 7. Coffee Automation
@@ -119,12 +121,18 @@ Some apps run continuously even when no window is open (e.g. coffee automation r
 Long-duration timer that runs when player is online (detected via sensor client input).
 
 **Features**:
-- Long countdown timer, resets when player goes offline
+- Long countdown timer that pauses while the player is offline, preserving remaining time like the original standalone timer
 - Harvest output activated for fixed duration when timer completes (via IO client)
 - "Force harvest now" - manually trigger harvest and reset timer
 - "Pause timer" - suspend countdown without losing remaining time
 - Total harvest counter (never reset)
 - Trip counter (resettable by user)
+
+**User clarification, 2026-10-27 — requirements only; no app implementation yet**:
+- When enabled, the coffee logic runs continuously on the central OS, even if its window is minimized, closed, covered, or absent from every monitor. Window visibility is never the timer's clock or on/off control.
+- Preserve the original `OLDFILES/CofeeTimer/timer.lua` restart protection: persist the remaining countdown, whether harvest is active, and remaining harvest duration, and restore them instead of reinitializing them at boot. Preserve future counters and explicit pause state as well.
+- The original checkpoints every second and at phase transitions. Future implementation must provide comparable progress protection, rather than relying only on the OS's default 30-second periodic checkpoint. Restarting the OS/client, unloading a chunk, or restarting the Minecraft server must not reset a saved countdown or restart a saved harvest from its full duration.
+- The original pauses while no player is detected; this supersedes the earlier generated text saying to reset on player logout. Offline time and window visibility must not silently reset progress. No elapsed-time catch-up during computer downtime is implied.
 
 **UI Modes**:
 - Minimal view (small monitors): remaining time, harvest active/inactive

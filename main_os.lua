@@ -5,8 +5,9 @@ local Server = dofile("Lib/server.lua")
 local networkConfig = storage.config("Configs/network.txt", {networkId = "home", channel = 45231})
 local config = storage.config("Configs/os.txt", {
     saveFile = "Configs/os_state.txt", tickInterval = 0.5,
-    saveInterval = 30, clientTimeout = 15, retryInterval = 2,
+    saveInterval = 30, clientTimeout = 15, retryInterval = 2, enabledApps = {},
 })
+assert(type(config.enabledApps) == "table", "Invalid enabledApps setting")
 for _, name in ipairs({"tickInterval", "saveInterval", "clientTimeout", "retryInterval"}) do
     assert(type(config[name]) == "number" and config[name] > 0, "Invalid OS setting: " .. name)
 end

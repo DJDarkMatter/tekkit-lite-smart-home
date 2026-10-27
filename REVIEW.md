@@ -32,7 +32,7 @@ The modem API signature and event arguments are documented in the [ComputerCraft
 - Save directories were not created, file-open failures were unchecked, and only windows/registry were saved. Checkpoints now include app state, logical mappings/outputs and boot generations, with recovery and visible failures.
 - Restored windows could be overwritten because `nextWindowId` reset to 1. IDs are now derived from restored windows.
 - Rendering ignored window coordinates, failed to clip to the screen, and had an incorrect title/close-button width. Touch offsets did not match rendered content. Central composition and hit testing now share the same geometry.
-- The taskbar handler was empty. There was no app API for opening windows and no app implementations or monitor clients. A launcher, window controls, app lifecycle/API, generic monitor client and example switchboard now make the existing architecture usable.
+- The taskbar handler was empty. There was no app API for opening windows or generic monitor client. A launcher, window controls, app lifecycle/API and generic monitor client now support the architecture. Apps are user-specific and opt-in; no app is bundled or enabled by default. The switchboard used to exercise window/IO behavior is a test fixture only.
 - Background jobs and saves depended on the arrival/count of unrelated events. Dedicated timers now drive background elapsed time and checkpoint intervals.
 
 ## Design decisions that need to remain explicit
@@ -48,3 +48,5 @@ The modem API signature and event arguments are documented in the [ComputerCraft
 ## Validation limits
 
 The Lua 5.1 test harness executes the real server, IO and monitor entry points against simulated APIs, including string-only modems and independent event queues/filesystems. It does not emulate the Minecraft world, Java/TLS support, a server's ComputerCraft configuration, wireless range or mod-specific sensor peripherals. Follow the README's one-wire test on the actual server before attaching production automation.
+
+After an in-game screenshot exposed the public server's `[IDT-Fix]` 0.5-second redstone limit, the harness gained a shared per-port write cooldown that reproduces that startup failure. IO now skips unchanged writes and queues changes with a default 0.6-second interval, acknowledging only fully applied snapshots. This tests the observed rule, not the complete server modification.

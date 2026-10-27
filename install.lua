@@ -1,7 +1,8 @@
--- SmartHome OS installer: bundled-v1
+-- SmartHome OS installer: bundled-v2
 -- Upload this ONE file to Pastebin. All role files are included below.
 -- Usage: inst server|io|monitor [--startup]
--- Installation makes NO HTTP requests. Existing Configs are preserved.
+-- User apps: inst app NAME PASTE_ID   or   inst app NAME --file PATH
+-- OS/client installation is offline. Apps are fetched only on request.
 local sources = {
     ["Lib/storage.lua"] = [=[-- Lua 5.1 / ComputerCraft 1.5. Only plain, serializable data belongs here.
 local storage = {}
@@ -654,7 +655,9 @@ function Server.new(net, storage, config)
         for _, file in ipairs(fs.list("Apps")) do
             if file:match("%.lua$") and not fs.isDir("Apps/" .. file) then
                 local name = file:gsub("%.lua$", "")
-                if state.appRegistry[name] ~= false then
+                -- Files and an old auto-populated registry are not consent to
+                -- run an app. Only explicitly enabled user apps may execute.
+                if config.enabledApps and config.enabledApps[name] == true then
                     local chunk, err = loadfile("Apps/" .. file)
                     local ok, app = false, err
                     if chunk then ok, app = pcall(chunk) end
@@ -788,11 +791,15 @@ end
 function IO.new(net, config)
     assert(type(config.clientId) == "string" and #config.clientId > 0, "Invalid IO clientId")
     assert(type(config.safeOff) == "boolean", "safeOff must be boolean")
+    local outputInterval = config.outputInterval or 0.6
+    assert(type(outputInterval) == "number" and outputInterval >= 0.5 and outputInterval < math.huge,
+        "outputInterval must be at least 0.5 seconds")
     local validSides = {}
     for _, side in ipairs(sides) do validSides[side] = true end
     for _, side in ipairs(config.sides) do assert(validSides[side], "Invalid IO side: " .. tostring(side)) end
-    local client = {connected = false, nonce = 0, lastRevision = -1, lastAnnounce = -math.huge,
+    local client = {connected = false, nonce = 0, lastRevision = -1, appliedRevision = -1, lastAnnounce = -math.huge,
         lastInputs = -math.huge, lastServer = 0, inputs = {}}
+    local outputs, targets, pendingRevision = {}, {}, nil
 
     local function allowed(side)
         if side == net.side then return false end
@@ -800,18 +807,71 @@ function IO.new(net, config)
         return false
     end
 
-    function client.clearOutputs()
-        for _, side in ipairs(sides) do
+    local function outputState(side, now)
+        if not outputs[side] then
+            outputs[side] = {bundled = redstone.getBundledOutput(side), digital = redstone.getOutput(side),
+                nextWrite = now + outputInterval}
+        end
+        return outputs[side]
+    end
+
+    local function acknowledge()
+        if client.connected and client.appliedRevision >= 0 then
+            net.send(net.config.channel, client.serverId, {type = "ioAck", clientId = config.clientId,
+                serverSession = client.serverSession, revision = client.appliedRevision})
+        end
+    end
+
+    local function flushOutputs(now)
+        local complete = true
+        for side, wanted in pairs(targets) do
             if allowed(side) then
-                redstone.setBundledOutput(side, 0)
-                redstone.setOutput(side, false)
+                local actual = outputState(side, now)
+                if now + 0.000001 >= actual.nextWrite then
+                    local kind
+                    -- IDT-Fix shares one cooldown between bundled and digital
+                    -- writes on each side. Prefer clearing an old signal first.
+                    if actual.bundled ~= wanted.bundled and wanted.bundled == 0 then kind = "bundled"
+                    elseif actual.digital ~= wanted.digital and not wanted.digital then kind = "digital"
+                    elseif actual.bundled ~= wanted.bundled then kind = "bundled"
+                    elseif actual.digital ~= wanted.digital then kind = "digital" end
+                    if kind then
+                        if kind == "bundled" then redstone.setBundledOutput(side, wanted[kind])
+                        else redstone.setOutput(side, wanted[kind]) end
+                        actual[kind], actual.nextWrite = wanted[kind], now + outputInterval
+                    end
+                end
+                if actual.bundled ~= wanted.bundled or actual.digital ~= wanted.digital then complete = false end
+            else
+                targets[side] = nil
             end
         end
+        if complete then
+            client.clearing = false
+            if client.connected and pendingRevision ~= nil then
+                client.appliedRevision, pendingRevision = pendingRevision, nil
+                acknowledge()
+            end
+        end
+    end
+
+    function client.clearOutputs()
+        local now = os.clock()
+        targets, pendingRevision, client.appliedRevision, client.clearing = {}, nil, -1, true
+        for _, side in ipairs(sides) do
+            if allowed(side) then
+                outputState(side, now)
+                targets[side] = {bundled = 0, digital = false}
+            end
+        end
+        flushOutputs(now)
     end
 
     function client.disconnect()
         if client.connected then print("OS disconnected; retrying") end
         client.connected = false
+        client.lastAnnounce, client.appliedRevision, client.clearing = -math.huge, -1, false
+        targets, pendingRevision = {}, nil
         if config.safeOff then client.clearOutputs() end
     end
 
@@ -847,12 +907,16 @@ function IO.new(net, config)
         if message.clientId ~= config.clientId then return end
         if message.type == "welcome" then
             if message.nonce ~= client.nonce or type(message.serverSession) ~= "string" then return end
+            if client.clearing then return end
             if client.connected and message.sender ~= client.serverId then return end
             local restarted = message.serverSession ~= client.serverSession
             local reconnected = not client.connected or restarted
             client.serverId, client.serverSession = message.sender, message.serverSession
             client.connected, client.lastServer = true, now
-            if restarted then client.lastRevision = -1 end
+            if restarted then
+                client.lastRevision, client.appliedRevision = -1, -1
+                targets, pendingRevision = {}, nil
+            end
             if reconnected then
                 print("Connected to OS computer " .. client.serverId)
                 client.readInputs(true)
@@ -866,25 +930,33 @@ function IO.new(net, config)
                 if not allowed(side) or type(values) ~= "table" or not integer(values.bundled, 65535)
                     or type(values.digital) ~= "boolean" then return end
             end
-            if message.revision >= client.lastRevision then
-                for side, values in pairs(message.outputs) do
-                    redstone.setBundledOutput(side, values.bundled)
-                    redstone.setOutput(side, values.digital)
-                end
-                client.lastRevision = message.revision
-            end
             client.lastServer = now
-            net.send(net.config.channel, client.serverId, {type = "ioAck", clientId = config.clientId,
-                serverSession = client.serverSession, revision = client.lastRevision})
+            if message.revision < client.lastRevision
+                or (message.revision == client.appliedRevision and pendingRevision == nil) then
+                acknowledge()
+                return
+            end
+            if message.revision > client.lastRevision or pendingRevision == nil then
+                targets = {}
+                for side, values in pairs(message.outputs) do
+                    targets[side] = {bundled = values.bundled, digital = values.digital}
+                end
+                client.lastRevision, pendingRevision = message.revision, message.revision
+            end
+            flushOutputs(now)
         end
     end
 
     function client.tick(now)
-        if not net.ensureModem() then
+        local modemPresent = net.ensureModem()
+        if not modemPresent then
             if client.connected then client.disconnect() end
-            return
         end
         if client.connected and now - client.lastServer >= config.timeout then client.disconnect() end
+        -- Timer-driven writes keep all modem/input events flowing during cooldown.
+        -- Finish startup/safe-off before accepting restored output commands.
+        flushOutputs(now)
+        if not modemPresent or client.clearing then return end
         if now - client.lastAnnounce >= config.announceInterval then client.announce(now) end
         if now - client.lastInputs >= config.announceInterval then
             client.readInputs(true)
@@ -1005,8 +1077,9 @@ local Server = dofile("Lib/server.lua")
 local networkConfig = storage.config("Configs/network.txt", {networkId = "home", channel = 45231})
 local config = storage.config("Configs/os.txt", {
     saveFile = "Configs/os_state.txt", tickInterval = 0.5,
-    saveInterval = 30, clientTimeout = 15, retryInterval = 2,
+    saveInterval = 30, clientTimeout = 15, retryInterval = 2, enabledApps = {},
 })
+assert(type(config.enabledApps) == "table", "Invalid enabledApps setting")
 for _, name in ipairs({"tickInterval", "saveInterval", "clientTimeout", "retryInterval"}) do
     assert(type(config[name]) == "number" and config[name] > 0, "Invalid OS setting: " .. name)
 end
@@ -1047,7 +1120,7 @@ local IO = dofile("Lib/io.lua")
 local networkConfig = storage.config("Configs/network.txt", {networkId = "home", channel = 45231})
 local config = storage.config("Configs/io.txt", {
     clientId = "io_" .. os.getComputerID(), sides = Network.sides,
-    announceInterval = 5, timeout = 15, safeOff = true,
+    announceInterval = 5, timeout = 15, safeOff = true, outputInterval = 0.6,
 })
 assert(type(config.announceInterval) == "number" and config.announceInterval >= 1, "Invalid announceInterval")
 assert(type(config.timeout) == "number" and config.timeout > config.announceInterval, "Invalid timeout")
@@ -1059,7 +1132,7 @@ client.clearOutputs()
 print("IO client: " .. config.clientId .. " (computer " .. net.id .. ")")
 if not net.modem then print("Attach a wireless modem; waiting...") end
 client.tick(os.clock())
-local timer = os.startTimer(1)
+local timer = os.startTimer(0.1)
 while true do
     local event, p1, p2, p3, p4 = os.pullEvent()
     if event == "modem_message" then
@@ -1069,7 +1142,7 @@ while true do
         client.readInputs(false)
     elseif event == "timer" and p1 == timer then
         client.tick(os.clock())
-        timer = os.startTimer(1)
+        timer = os.startTimer(0.1)
     elseif event == "peripheral" or event == "peripheral_detach" then
         net.peripheralChanged(p1)
         if not net.modem then client.disconnect() end
@@ -1114,63 +1187,80 @@ while true do
     end
 end
 ]=],
-    ["Apps/switchboard.lua"] = [=[-- No modem, redstone, filesystem or machine-specific wiring in an app.
-local app = {minWidth = 18, minHeight = 4}
-function app.render(width, height, state, osApi)
-    local outputs = osApi.getOutputs()
-    if #outputs == 0 then
-        return {"No outputs mapped.", "On the OS console:", "map test io_ID left white", "set test on"}
-    end
-    local lines = {"Touch a row to toggle"}
-    for i = 1, math.min(#outputs, height - 1) do
-        local output = outputs[i]
-        lines[i + 1] = output.name .. ": " .. (output.value and "ON" or "OFF")
-            .. (output.confirmed and "" or (output.online and " (pending)" or " (offline)"))
-    end
-    if state.lastError then lines[height] = "Error: " .. state.lastError end
-    return lines
-end
-function app.handleTouch(x, y, width, height, state, osApi)
-    local output = osApi.getOutputs()[y - 1]
-    if output and y <= height then
-        local ok, err = osApi.setOutput(output.name, not output.value)
-        state.lastError = not ok and tostring(err) or nil
-        return true
-    end
-    return false
-end
-return app
-]=],
 }
 local args = {...}
 local role, autorun = args[1], false
 local entry = {server = "main_os.lua", io = "Clients/io_client.lua", monitor = "Clients/monitor_client.lua"}
-print("SmartHome installer: bundled-v1")
-if not entry[role] then
+print("SmartHome installer: bundled-v2")
+if not entry[role] and role ~= "app" then
     print("Usage: inst server|io|monitor [--startup]")
+    print("       inst app NAME PASTE_ID | inst app NAME --file PATH")
     return
 end
-for index = 2, #args do
-    assert(args[index] == "--startup", "Usage: inst server|io|monitor [--startup]")
-    autorun = true
-end
 assert(shell.dir() == "", "Run cd / first")
-local files = {"Lib/storage.lua", "Lib/network.lua"}
-if role == "server" then
-    files[#files + 1] = "Lib/server.lua"
-    files[#files + 1] = "Apps/switchboard.lua"
-elseif role == "io" then files[#files + 1] = "Lib/io.lua"
-else files[#files + 1] = "Lib/monitor.lua" end
-files[#files + 1] = entry[role]
-if autorun then
-    sources.startup = 'shell.setDir("/")\nshell.run("' .. entry[role] .. '")\n'
-    files[#files + 1] = "startup"
+local files
+if role == "app" then
+    local name, source = args[2], args[3]
+    assert(type(name) == "string" and name:match("^[%w_-]+$"), "Specify a simple app name without .lua")
+    assert(source and (source == "--file" and args[4] and not args[5]
+        or source:match("^%w+$") and not args[4]), "Usage: inst app NAME PASTE_ID | inst app NAME --file PATH")
+    assert(fs.exists("main_os.lua") and fs.exists("Lib/server.lua"), "Install apps on the central OS computer")
+    local path = "Apps/" .. name .. ".lua"
+    local contents
+    if source == "--file" then
+        local file = assert(fs.open(args[4], "r"), "Cannot read app source: " .. args[4])
+        contents = file.readAll(); file.close()
+    else
+        if not fs.exists("Apps") then fs.makeDir("Apps") end
+        local temporary = path .. ".download"
+        if fs.exists(temporary) then fs.delete(temporary) end
+        assert(shell.run("pastebin", "get", source, temporary) and fs.exists(temporary), "Pastebin app download failed")
+        local file = assert(fs.open(temporary, "r"), "Cannot read downloaded app")
+        contents = file.readAll(); file.close()
+        fs.delete(temporary)
+    end
+    assert(type(contents) == "string" and #contents > 0, "Empty app source")
+    local chunk, err = loadstring(contents, path)
+    assert(chunk, "Invalid app Lua: " .. tostring(err))
+    -- Read settings without resetting them or executing the app at install time.
+    local storageChunk = assert(loadstring(sources["Lib/storage.lua"], "Lib/storage.lua"))
+    setfenv(storageChunk, getfenv(1))
+    local storage = storageChunk()
+    local configPath = "Configs/os.txt"
+    local settings = storage.load(configPath)
+    if not settings then
+        for _, suffix in ipairs({"", ".tmp", ".bak"}) do
+            assert(not fs.exists(configPath .. suffix), "Unreadable OS settings")
+        end
+        settings = {}
+    end
+    if settings.enabledApps == nil then settings.enabledApps = {} end
+    assert(type(settings.enabledApps) == "table", "Invalid enabledApps setting")
+    settings.enabledApps[name] = true -- Explicit app installation opts this app in.
+    sources[path], sources[configPath] = contents, textutils.serialize(settings)
+    files = {path, configPath}
+else
+    for index = 2, #args do
+        assert(args[index] == "--startup", "Usage: inst server|io|monitor [--startup]")
+        autorun = true
+    end
+    files = {"Lib/storage.lua", "Lib/network.lua"}
+    if role == "server" then files[#files + 1] = "Lib/server.lua"
+    elseif role == "io" then files[#files + 1] = "Lib/io.lua"
+    else files[#files + 1] = "Lib/monitor.lua" end
+    files[#files + 1] = entry[role]
+    if autorun then
+        sources.startup = 'shell.setDir("/")\nshell.run("' .. entry[role] .. '")\n'
+        files[#files + 1] = "startup"
+    end
 end
 -- Check every file before replacing any installed program.
 for _, path in ipairs(files) do
     local contents = assert(sources[path], "Missing bundled file: " .. path)
-    local chunk, err = loadstring(contents, path)
-    assert(chunk, "Invalid bundled Lua: " .. path .. ": " .. tostring(err))
+    if path:match("%.lua$") or path == "startup" then
+        local chunk, err = loadstring(contents, path)
+        assert(chunk, "Invalid Lua: " .. path .. ": " .. tostring(err))
+    else assert(type(textutils.unserialize(contents)) == "table", "Invalid settings: " .. path) end
 end
 for _, path in ipairs(files) do
     local dir = path:match("^(.*)/[^/]+$") or ""
@@ -1186,6 +1276,11 @@ for _, path in ipairs(files) do
     end
     fs.move(path .. ".download", path)
     print("Installed " .. path)
+end
+if role == "app" then
+    print("Installed and enabled user app: " .. args[2])
+    print("Restart the central OS to load it")
+    return
 end
 print("Installed " .. role .. " from the bundled files")
 if autorun then

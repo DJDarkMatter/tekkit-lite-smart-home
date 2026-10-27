@@ -1,4 +1,4 @@
--- No modem, redstone, filesystem or machine-specific wiring in an app.
+-- Test fixture only. Never bundled, installed or enabled by the OS installer.
 local app = {minWidth = 18, minHeight = 4}
 function app.render(width, height, state, osApi)
     local outputs = osApi.getOutputs()

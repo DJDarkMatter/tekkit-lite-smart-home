@@ -7,6 +7,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Check bundled installer matches its source files
+        run: python3 tools/build_installer.py --check
       - run: sudo apt-get update && sudo apt-get install -y lua5.1
       - name: Check Lua syntax
         run: find . -name '*.lua' -not -path './.git/*' -print0 | xargs -0 -n1 luac5.1 -p

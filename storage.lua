@@ -21,7 +21,8 @@ end
 function storage.save(path, value)
     local ok, err = pcall(function()
         local contents = textutils.serialize(value)
-        local dir = fs.getDir(path)
+        -- fs.getDir was only added in CC 1.63; Tekkit Lite uses older CC.
+        local dir = path:match("^(.*)/[^/]+$") or ""
         if dir ~= "" and not fs.exists(dir) then fs.makeDir(dir) end
         local file = assert(fs.open(path .. ".tmp", "w"), "Cannot write " .. path)
         file.write(contents)

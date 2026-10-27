@@ -493,7 +493,9 @@ function Server.new(net, storage, config)
         for _, file in ipairs(fs.list("Apps")) do
             if file:match("%.lua$") and not fs.isDir("Apps/" .. file) then
                 local name = file:gsub("%.lua$", "")
-                if state.appRegistry[name] ~= false then
+                -- Files and an old auto-populated registry are not consent to
+                -- run an app. Only explicitly enabled user apps may execute.
+                if config.enabledApps and config.enabledApps[name] == true then
                     local chunk, err = loadfile("Apps/" .. file)
                     local ok, app = false, err
                     if chunk then ok, app = pcall(chunk) end
